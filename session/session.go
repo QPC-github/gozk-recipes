@@ -97,8 +97,6 @@ func (s SessionOpts) Create() (*ZKSession, error) {
 		_ = session.conn.Close()
 		return nil, fmt.Errorf("waiting for initial connection: %w", err)
 	}
-	server, _ := session.CurrentServer()
-	s.logger.Printf("session established with %s", server)
 
 	return session, nil
 }
@@ -214,8 +212,14 @@ func NewZKSession(servers string, recvTimeout time.Duration, logger stdLogger) (
 	)
 }
 
-func (s *ZKSession) CurrentServer() (string, error) {
+// CurrentConnection returns the ip and port of the currently established connection or an error.
+func (s *ZKSession) CurrentConnection() (string, error) {
 	return s.conn.CurrentServer()
+}
+
+// CurrentServer returns the ip and port of the currently connected zookeeper host.
+func (s *ZKSession) CurrentServer() string {
+	return s.conn.ConnectedServer()
 }
 
 func (s *ZKSession) SetServersResolutionDelay(delay time.Duration) {
