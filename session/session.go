@@ -83,10 +83,8 @@ func (s SessionOpts) Create() (*ZKSession, error) {
 	conn.SetServersResolutionDelay(s.dnsRefresh)
 
 	session := &ZKSession{
-		servers:       servers,
-		recvTimeout:   s.recvTimeout,
+		opts:          s,
 		conn:          conn,
-		clientID:      conn.ClientId(),
 		events:        events,
 		subscriptions: make([]chan<- ZKSessionEvent, 0),
 		log:           s.logger,
@@ -164,12 +162,10 @@ func WithDNSRefresh(duration time.Duration) SessionOpt {
 }
 
 type ZKSession struct {
-	servers     string
-	recvTimeout time.Duration
-	conn        *zookeeper.Conn
-	clientID    *zookeeper.ClientId
-	events      <-chan zookeeper.Event
-	mu          sync.Mutex
+	opts   SessionOpts
+	conn   *zookeeper.Conn
+	events <-chan zookeeper.Event
+	mu     sync.Mutex
 
 	subscriptions []chan<- ZKSessionEvent
 	log           stdLogger
@@ -249,7 +245,7 @@ func (s *ZKSession) manage() {
 			case zookeeper.STATE_EXPIRED_SESSION:
 				s.log.Printf("gozk-recipes/session: got STATE_EXPIRED_SESSION for conn %+v", s.conn)
 				expired = true
-				conn, events, err := zookeeper.Redial(s.servers, s.recvTimeout, s.clientID)
+				conn, events, err := zookeeper.Redial(strings.Join(s.opts.servers, ","), s.opts.recvTimeout, s.opts.clientID)
 				if err == nil {
 					s.log.Printf("gozk-recipes/session: STATE_EXPIRED_SESSION redialed conn %+v", conn)
 					s.mu.Lock()
@@ -261,8 +257,9 @@ func (s *ZKSession) manage() {
 					}
 					s.conn = conn
 					s.events = events
-					s.clientID = conn.ClientId()
+					s.opts = WithZookeeperClientID(conn.ClientId())(s.opts)
 					s.mu.Unlock()
+					s.log.Printf("gozk-recipes/session: session re-established with %s", s.conn.ConnectedServer())
 				}
 				if err != nil {
 					s.notifySubscribers(SessionFailed)
