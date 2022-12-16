@@ -9,9 +9,9 @@ up:
       modules: true
 
 env:
-  TOXIPROXY_HOST: 192.168.64.87
-  TOXIPROXY_URL: http://192.168.64.87:8474
-  ZOOKEEPERS: 192.168.64.87:2181
+  TOXIPROXY_HOST: 192.168.64.88
+  TOXIPROXY_URL: http://192.168.64.88:8474
+  ZOOKEEPERS: 192.168.64.88:2181
 
   # Set CGO flags for finding zookeeper libraries on MacOS X with homebrew.
   # If your zookeeper headers are in a different location, i.e. you don't use
