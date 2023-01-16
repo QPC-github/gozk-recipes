@@ -2,10 +2,12 @@ package session
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Shopify/gozk"
+	zookeeper "github.com/Shopify/gozk"
 )
 
 type ZKSessionEvent uint
@@ -45,83 +47,69 @@ const (
 	// SessionFailed indicates that the session failed unrecoverably. This may mean incorrect credentials, or broken quorum,
 	// or a partition from the entire ZooKeeper cluster, or any other mode of absolute failure.
 	SessionFailed
+
+	DefaultRecvTimeout = 5 * time.Second
 )
 
 type ZKSession struct {
-	servers     string
-	recvTimeout time.Duration
-	conn        *zookeeper.Conn
-	clientID    *zookeeper.ClientId
-	events      <-chan zookeeper.Event
-	mu          sync.Mutex
+	opts   SessionOpts
+	conn   *zookeeper.Conn
+	events <-chan zookeeper.Event
+	mu     sync.Mutex
 
 	subscriptions []chan<- ZKSessionEvent
 	log           stdLogger
 }
 
 func ResumeZKSession(servers string, recvTimeout time.Duration, logger stdLogger, clientId *zookeeper.ClientId) (*ZKSession, error) {
-	return newZKSession(servers, recvTimeout, logger, clientId)
+	return NewSessionWithOpts(
+		WithLogger(logger),
+		WithZookeepers(strings.Split(servers, ",")),
+		WithRecvTimeout(recvTimeout),
+		WithZookeeperClientID(clientId),
+	)
+}
+
+func NewSessionWithOpts(opts ...SessionOpt) (*ZKSession, error) {
+	sessionOpts := SessionOpts{
+		logger:      &nullLogger{},
+		recvTimeout: DefaultRecvTimeout,
+	}
+
+	for _, so := range opts {
+		sessionOpts = so(sessionOpts)
+	}
+
+	session, err := sessionOpts.Create()
+	if err != nil {
+		return nil, fmt.Errorf("creating zookeeper session: %w", err)
+	}
+
+	go session.manage()
+
+	return session, nil
 }
 
 func NewZKSession(servers string, recvTimeout time.Duration, logger stdLogger) (*ZKSession, error) {
-	return newZKSession(servers, recvTimeout, logger, nil)
+	return NewSessionWithOpts(
+		WithLogger(logger),
+		WithZookeepers(strings.Split(servers, ",")),
+		WithRecvTimeout(recvTimeout),
+	)
 }
 
-func newZKSession(servers string, recvTimeout time.Duration, logger stdLogger, clientId *zookeeper.ClientId) (*ZKSession, error) {
-	var conn *zookeeper.Conn
-	var events <-chan zookeeper.Event
-	var err error
-
-	if clientId == nil {
-		conn, events, err = zookeeper.Dial(servers, recvTimeout)
-	} else {
-		conn, events, err = zookeeper.Redial(servers, recvTimeout, clientId)
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	if logger == nil {
-		logger = &nullLogger{}
-	}
-
-	s := &ZKSession{
-		servers:       servers,
-		recvTimeout:   recvTimeout,
-		conn:          conn,
-		clientID:      conn.ClientId(),
-		events:        events,
-		subscriptions: make([]chan<- ZKSessionEvent, 0),
-		log:           logger,
-	}
-
-	err = waitForConnection(events)
-	if err != nil {
-		_ = s.conn.Close()
-		return nil, err
-	}
-
-	go s.manage()
-
-	return s, nil
+// CurrentConnection returns the ip and port of the currently established connection or an error.
+func (s *ZKSession) CurrentConnection() (string, error) {
+	return s.conn.CurrentServer()
 }
 
-func waitForConnection(events <-chan zookeeper.Event) error {
-	for {
-		select {
-		case event := <-events:
-			switch event.State {
-			case zookeeper.STATE_AUTH_FAILED, zookeeper.STATE_EXPIRED_SESSION, zookeeper.STATE_CLOSED:
-				return ErrZKSessionNotConnected
-			case zookeeper.STATE_CONNECTED:
-				return nil
-			}
-		case <-time.After(5 * time.Second):
-			return ErrZKSessionNotConnected
-		}
-	}
-	// We should not reach this state
-	return ErrZKSessionNotConnected
+// CurrentServer returns the ip and port of the currently connected zookeeper host.
+func (s *ZKSession) CurrentServer() string {
+	return s.conn.ConnectedServer()
+}
+
+func (s *ZKSession) SetServersResolutionDelay(delay time.Duration) {
+	s.conn.SetServersResolutionDelay(delay)
 }
 
 func (s *ZKSession) Subscribe(subscription chan<- ZKSessionEvent) {
@@ -147,7 +135,7 @@ func (s *ZKSession) manage() {
 			case zookeeper.STATE_EXPIRED_SESSION:
 				s.log.Printf("gozk-recipes/session: got STATE_EXPIRED_SESSION for conn %+v", s.conn)
 				expired = true
-				conn, events, err := zookeeper.Redial(s.servers, s.recvTimeout, s.clientID)
+				conn, events, err := zookeeper.Redial(strings.Join(s.opts.servers, ","), s.opts.recvTimeout, s.opts.clientID)
 				if err == nil {
 					s.log.Printf("gozk-recipes/session: STATE_EXPIRED_SESSION redialed conn %+v", conn)
 					s.mu.Lock()
@@ -159,8 +147,9 @@ func (s *ZKSession) manage() {
 					}
 					s.conn = conn
 					s.events = events
-					s.clientID = conn.ClientId()
+					s.opts = WithZookeeperClientID(conn.ClientId())(s.opts)
 					s.mu.Unlock()
+					s.log.Printf("gozk-recipes/session: session re-established with %s", s.conn.ConnectedServer())
 				}
 				if err != nil {
 					s.notifySubscribers(SessionFailed)
